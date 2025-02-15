@@ -2,6 +2,8 @@ import pandas as pd
 import re
 import unicodedata
 from tqdm import tqdm  # For progress bar
+from multiprocessing import Pool, cpu_count
+import os
 
 # Input and output file paths
 INPUT_CSV = "data/extracted_entities.csv"
@@ -33,37 +35,43 @@ def filter_entity(entity, label):
         return False
     if entity in STOPWORDS:  # Remove stopwords
         return False
-    if label in ["DATE", "TIME", "PERCENT", "MONEY", "QUANTITY"]:  # Remove irrelevant labels
-        return False
     return True
 
-# Function to preprocess the data
+# Function to process a single chunk
+def process_chunk(chunk):
+    """Process a single chunk of data."""
+    chunk['text'] = chunk['text'].apply(clean_text)
+    chunk['entity'] = chunk['entity'].apply(clean_text)
+    
+    # Filter entities
+    chunk = chunk[chunk.apply(lambda x: filter_entity(x['entity'], x['label']), axis=1)]
+    
+    # Deduplicate entities within the same article
+    chunk = chunk.drop_duplicates(subset=['title', 'entity', 'label'])
+    
+    return chunk
+
+# Function to preprocess the data in parallel
 def preprocess_data(input_csv, output_csv):
-    """Preprocess the extracted entities."""
+    """Preprocess the extracted entities in parallel."""
     print(f"[INFO] Loading data from {input_csv}...")
     chunksize = 10**6  # Process in chunks to handle large files
-    processed_data = []
+    total_rows = sum(1 for _ in open(input_csv, 'r', encoding='utf-8')) - 1  # Get total rows for progress bar
+    num_processes = cpu_count()  # Use all available CPU cores
 
-    # Read the CSV file in chunks
-    for chunk in tqdm(pd.read_csv(input_csv, chunksize=chunksize, encoding='utf-8')):
-        chunk['text'] = chunk['text'].apply(clean_text)
-        chunk['entity'] = chunk['entity'].apply(clean_text)
-        
-        # Filter entities
-        chunk = chunk[chunk.apply(lambda x: filter_entity(x['entity'], x['label']), axis=1)]
-        
-        # Deduplicate entities within the same article
-        chunk = chunk.drop_duplicates(subset=['title', 'entity', 'label'])
-        
-        processed_data.append(chunk)
+    # Initialize the output file with headers
+    if not os.path.exists(output_csv):
+        pd.DataFrame(columns=['title', 'text', 'entity', 'label']).to_csv(output_csv, index=False, encoding='utf-8')
 
-    # Concatenate all processed chunks
-    print("[INFO] Concatenating processed chunks...")
-    processed_df = pd.concat(processed_data, ignore_index=True)
-    
-    # Save the preprocessed data to a new CSV file
-    print(f"[INFO] Saving preprocessed data to {output_csv}...")
-    processed_df.to_csv(output_csv, index=False, encoding='utf-8')
+    # Process chunks in parallel
+    with Pool(num_processes) as pool:
+        for chunk in tqdm(pd.read_csv(input_csv, chunksize=chunksize, encoding='utf-8'), total=total_rows//chunksize + 1):
+            processed_chunks = pool.map(process_chunk, [chunk])
+            
+            # Append processed chunks to the output file
+            for processed_chunk in processed_chunks:
+                processed_chunk.to_csv(output_csv, mode='a', index=False, encoding='utf-8', header=False)
+
     print("[INFO] Preprocessing completed.")
 
 # Run the preprocessing
